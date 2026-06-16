@@ -25,6 +25,8 @@ dependencies = [
     "threadpoolctl>=3.6.0",
     "numba>=0.65.1",
     "pandas>=3.0.3",
+    "pyexiftool>=0.5.6",
+    "scipy>=1.17.1",
 ]
 
 # PyTorch CUDA 12.8 wheel index — use cu128 builds for CUDA 12.x systems
