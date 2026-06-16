@@ -27,6 +27,8 @@ dependencies = [
     "pandas>=3.0.3",
     "pyexiftool>=0.5.6",
     "scipy>=1.17.1",
+    "accelerate>=1.14.0",
+    "timm>=1.0.27",
 ]
 
 # PyTorch CUDA 12.8 wheel index — use cu128 builds for CUDA 12.x systems
