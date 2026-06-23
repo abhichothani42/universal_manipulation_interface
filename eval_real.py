@@ -56,7 +56,7 @@ from umi.real_world.real_inference_util import (get_real_obs_dict,
                                                 get_real_obs_resolution,
                                                 get_real_umi_obs_dict,
                                                 get_real_umi_action)
-from umi.real_world.spacemouse_shared_memory import Spacemouse
+from umi.real_world.leader_arm_shared_memory import LeaderArm
 from umi.common.pose_util import pose_to_mat, mat_to_pose
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -170,7 +170,13 @@ def main(input, output, robot_config,
 
     print("steps_per_inference:", steps_per_inference)
     with SharedMemoryManager() as shm_manager:
-        with Spacemouse(shm_manager=shm_manager) as sm, \
+        with LeaderArm(
+                shm_manager=shm_manager,
+                leader_ip=robots_config[0]['leader_ip'],
+                frequency=100,
+                init_joints_pos=(np.array(robots_config[0]['init_joints_pos'])
+                    if robots_config[0].get('init_joints_pos') is not None else None),
+            ) as leader, \
             KeystrokeCounter() as key_counter, \
             BimanualUmiEnv(
                 output_dir=output,
@@ -196,6 +202,9 @@ def main(input, output, robot_config,
                 max_rot_speed=6.0,
                 shm_manager=shm_manager) as env:
             cv2.setNumThreads(2)
+            # leader arm(s) used for teleoperation, one per follower robot
+            # For bimanual, add one LeaderArm per robot.
+            leaders = [leader]
             print("Waiting for camera")
             time.sleep(1.0)
 
@@ -361,7 +370,7 @@ def main(input, output, robot_config,
                                 rot = ep[f'robot{robot_idx}_eef_rot_axis_angle'][0]
                                 grip = ep[f'robot{robot_idx}_gripper_width'][0]
                                 pose = np.concatenate([pos, rot])
-                                env.robots[robot_idx].servoL(pose, duration=duration)
+                                env.robots[robot_idx].schedule_waypoint(pose, target_time=time.time() + duration)
                                 env.grippers[robot_idx].schedule_waypoint(grip, target_time=time.time() + duration)
                                 target_pose[robot_idx] = pose
                                 gripper_target_pos[robot_idx] = grip
@@ -382,26 +391,13 @@ def main(input, output, robot_config,
                         break
 
                     precise_wait(t_sample)
-                    # get teleop command
-                    sm_state = sm.get_motion_state_transformed()
-                    # print(sm_state)
-                    dpos = sm_state[:3] * (0.5 / frequency)
-                    drot_xyz = sm_state[3:] * (1.5 / frequency)
-
-                    drot = st.Rotation.from_euler('xyz', drot_xyz)
-                    for robot_idx in control_robot_idx_list:
-                        target_pose[robot_idx, :3] += dpos
-                        target_pose[robot_idx, 3:] = (drot * st.Rotation.from_rotvec(
-                            target_pose[robot_idx, 3:])).as_rotvec()
-
-                    dpos = 0
-                    if sm.is_button_pressed(0):
-                        # close gripper
-                        dpos = -gripper_speed / frequency
-                    if sm.is_button_pressed(1):
-                        dpos = gripper_speed / frequency
-                    for robot_idx in control_robot_idx_list:
-                        gripper_target_pos[robot_idx] = np.clip(gripper_target_pos[robot_idx] + dpos, 0, max_gripper_width)
+                    # get teleop command from the leader arm(s):
+                    # the follower mirrors the leader's absolute 6-DOF pose and gripper width
+                    for robot_idx in range(target_pose.shape[0]):
+                        leader_state = leaders[robot_idx].get_state()
+                        target_pose[robot_idx] = np.array(leader_state['LeaderTCPPose'])
+                        gripper_target_pos[robot_idx] = np.clip(
+                            float(leader_state['LeaderGripperPos']), 0, max_gripper_width)
 
                     # solve collision with table
                     for robot_idx in control_robot_idx_list:

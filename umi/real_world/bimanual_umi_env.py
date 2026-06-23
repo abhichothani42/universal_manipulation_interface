@@ -5,9 +5,9 @@ import time
 import shutil
 import math
 from multiprocessing.managers import SharedMemoryManager
-from umi.real_world.rtde_interpolation_controller import RTDEInterpolationController
 from umi.real_world.wsg_controller import WSGController
-from umi.real_world.franka_interpolation_controller import FrankaInterpolationController
+from umi.real_world.trossen_arm_controller import (
+    TrossenArmController, TrossenGripperController)
 from umi.real_world.multi_uvc_camera import MultiUvcCamera, VideoRecorder
 from diffusion_policy.common.timestamp_accumulator import (
     TimestampActionAccumulator,
@@ -206,11 +206,13 @@ class BimanualUmiEnv:
             j_init = None
 
         assert len(robots_config) == len(grippers_config)
-        robots: List[RTDEInterpolationController] = list()
-        grippers: List[WSGController] = list()
+        robots: List = list()
+        grippers: List = list()
         for rc in robots_config:
             if rc['robot_type'].startswith('ur5'):
                 assert rc['robot_type'] in ['ur5', 'ur5e']
+                # lazy import: only require ur_rtde when a UR5 is actually used
+                from umi.real_world.rtde_interpolation_controller import RTDEInterpolationController
                 this_robot = RTDEInterpolationController(
                     shm_manager=shm_manager,
                     robot_ip=rc['robot_ip'],
@@ -231,6 +233,8 @@ class BimanualUmiEnv:
                     receive_latency=rc['robot_obs_latency']
                 )
             elif rc['robot_type'].startswith('franka'):
+                # lazy import: only require franka deps when a Franka is actually used
+                from umi.real_world.franka_interpolation_controller import FrankaInterpolationController
                 this_robot = FrankaInterpolationController(
                     shm_manager=shm_manager,
                     robot_ip=rc['robot_ip'],
@@ -240,18 +244,39 @@ class BimanualUmiEnv:
                     verbose=False,
                     receive_latency=rc['robot_obs_latency']
                 )
+            elif rc['robot_type'].startswith('trossen'):
+                # The Trossen arm owns its end-effector gripper in the same process,
+                # so a matching TrossenGripperController adapter is created below.
+                this_robot = TrossenArmController(
+                    shm_manager=shm_manager,
+                    follower_ip=rc['robot_ip'],
+                    frequency=rc.get('frequency', 125),
+                    max_pos_speed=max_pos_speed*cube_diag,
+                    max_rot_speed=max_rot_speed*cube_diag,
+                    launch_timeout=3,
+                    init_joints_pos=rc.get('init_joints_pos', None),
+                    soft_real_time=False,
+                    verbose=False,
+                    receive_latency=rc['robot_obs_latency'],
+                    gripper_max_width=rc.get('gripper_max_width', 0.04)
+                )
             else:
                 raise NotImplementedError()
             robots.append(this_robot)
 
-        for gc in grippers_config:
-            this_gripper = WSGController(
-                shm_manager=shm_manager,
-                hostname=gc['gripper_ip'],
-                port=gc['gripper_port'],
-                receive_latency=gc['gripper_obs_latency'],
-                use_meters=True
-            )
+        for robot_idx, gc in enumerate(grippers_config):
+            rc = robots_config[robot_idx]
+            if rc['robot_type'].startswith('trossen'):
+                # gripper is part of the Trossen arm; reuse its process via an adapter
+                this_gripper = TrossenGripperController(robots[robot_idx])
+            else:
+                this_gripper = WSGController(
+                    shm_manager=shm_manager,
+                    hostname=gc['gripper_ip'],
+                    port=gc['gripper_port'],
+                    receive_latency=gc['gripper_obs_latency'],
+                    use_meters=True
+                )
 
             grippers.append(this_gripper)
 
