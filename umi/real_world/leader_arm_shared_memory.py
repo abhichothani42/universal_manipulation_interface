@@ -12,8 +12,7 @@ class LeaderArm(mp.Process):
     publishes it to a shared memory ring buffer.
 
     The leader arm is set to external_effort mode with zero efforts (gravity
-    compensation) so it can be moved freely by the human operator. This replaces
-    the SpaceMouse as the teleoperation input for the UMI eval loop.
+    compensation) so it can be moved freely.
     """
 
     def __init__(self,
@@ -39,9 +38,9 @@ class LeaderArm(mp.Process):
 
         example = {
             # Cartesian EEF pose of the leader: [x, y, z, rx, ry, rz]
-            # in metres and radians (angle-axis), same convention as UR5 ActualTCPPose
+            # in meters and radians (angle-axis), same convention as UR5 ActualTCPPose
             'LeaderTCPPose': np.zeros((6,), dtype=np.float64),
-            # leader gripper width in metres (same convention as the follower / WSG)
+            # leader gripper width in meters (same convention as the follower / WSG)
             'LeaderGripperPos': 0.0,
             'receive_timestamp': time.time(),
         }
@@ -120,7 +119,9 @@ class LeaderArm(mp.Process):
             # without waiting for the first sleep cycle (mirrors Spacemouse.run())
             self.ring_buffer.put({
                 'LeaderTCPPose':     np.array(driver.get_cartesian_positions()),
-                'LeaderGripperPos':  driver.get_gripper_position(),
+                # Multiply by 2: driver returns one-side stroke; zarr/ring buffer
+                # convention is total-width.
+                'LeaderGripperPos':  driver.get_gripper_position() * 2.0,
                 'receive_timestamp': time.time(),
             })
             self.ready_event.set()
@@ -132,7 +133,9 @@ class LeaderArm(mp.Process):
                 # overwrite with latest hardware reading (not accumulate — same as SpaceMouse)
                 self.ring_buffer.put({
                     'LeaderTCPPose':     np.array(driver.get_cartesian_positions()),
-                    'LeaderGripperPos':  driver.get_gripper_position(),
+                    # Multiply by 2: driver returns one-side stroke; zarr/ring buffer
+                    # convention is total-width.
+                    'LeaderGripperPos':  driver.get_gripper_position() * 2.0,
                     'receive_timestamp': time.time(),
                 })
 

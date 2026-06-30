@@ -28,7 +28,7 @@ class TrossenArmController(mp.Process):
                  verbose=False,
                  receive_keys=None,
                  receive_latency=0.0,
-                 gripper_max_width=0.04,
+                 gripper_max_width=0.044,
                  get_max_k=None):
         # verify
         assert 0 < frequency <= 500
@@ -235,16 +235,18 @@ class TrossenArmController(mp.Process):
                 # if diff > 0:
                 #     print('extrapolate', diff)
                 pose_command = pose_interp(t_now)
-                follower_driver.set_cartesian_positions(pose_command, 
+                follower_driver.set_cartesian_positions(pose_command,
                                                         trossen_arm.InterpolationSpace.cartesian,
                                                         dt,
                                                         False)
 
                 # command gripper to the interpolated width
+                # gripper_interp holds total-width values (zarr convention = full gap
+                # between both fingers). The Trossen driver expects one-side stroke.
                 gripper_command = float(np.clip(
                     gripper_interp(t_now)[0], 0.0, self.gripper_max_width))
                 follower_driver.set_gripper_position(
-                    gripper_command, dt, False)
+                    gripper_command / 2.0, dt, False)
 
                 # update robot state
                 # Read follower actual state + leader state and publish to ring buffer.
@@ -255,9 +257,11 @@ class TrossenArmController(mp.Process):
                     'ActualTCPSpeed': np.array(follower_driver.get_cartesian_velocities()),
                     'ActualQ':        np.array(follower_driver.get_all_positions()),
                     'ActualQd':       np.array(follower_driver.get_all_velocities()),
-                    'TargetTCPPose':  np.array(pose_command),  # last pose sent to follower
-                    'gripper_position': follower_driver.get_gripper_position(),
-                    'gripper_velocity': follower_driver.get_gripper_velocity(),
+                    'TargetTCPPose':  np.array(pose_command),  # UMI TCP target (before conversion)
+                    # Multiply by 2: driver returns one-side stroke; ring buffer and
+                    # zarr training data use total-width.
+                    'gripper_position': follower_driver.get_gripper_position() * 2.0,
+                    'gripper_velocity': follower_driver.get_gripper_velocity() * 2.0,
                     'gripper_receive_timestamp': t_recv,
                     'gripper_timestamp': t_recv - self.receive_latency,
                     'robot_receive_timestamp': t_recv,

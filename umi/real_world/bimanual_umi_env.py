@@ -258,7 +258,7 @@ class BimanualUmiEnv:
                     soft_real_time=False,
                     verbose=False,
                     receive_latency=rc['robot_obs_latency'],
-                    gripper_max_width=rc.get('gripper_max_width', 0.04)
+                    gripper_max_width=rc.get('gripper_max_width', 0.044)
                 )
             else:
                 raise NotImplementedError()

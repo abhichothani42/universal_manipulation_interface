@@ -130,7 +130,7 @@ def main(input, output, robot_config,
     steps_per_inference, max_duration,
     frequency, command_latency, 
     no_mirror, sim_fov, camera_intrinsics, mirror_swap):
-    max_gripper_width = 0.09
+    max_gripper_width = 0.088
     gripper_speed = 0.2
     
     # load robot config file
@@ -189,7 +189,7 @@ def main(input, output, robot_config,
                 init_joints=init_joints,
                 enable_multi_cam_vis=True,
                 # latency
-                camera_obs_latency=0.17,
+                camera_obs_latency=0.1,
                 # obs
                 camera_obs_horizon=cfg.task.shape_meta.obs.camera0_rgb.horizon,
                 robot_obs_horizon=cfg.task.shape_meta.obs.robot0_eef_pos.horizon,
@@ -198,8 +198,8 @@ def main(input, output, robot_config,
                 fisheye_converter=fisheye_converter,
                 mirror_swap=mirror_swap,
                 # action
-                max_pos_speed=2.0,
-                max_rot_speed=6.0,
+                max_pos_speed=0.25,
+                max_rot_speed=0.6,
                 shm_manager=shm_manager) as env:
             cv2.setNumThreads(2)
             # leader arm(s) used for teleoperation, one per follower robot
