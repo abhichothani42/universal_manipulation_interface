@@ -32,6 +32,7 @@ dependencies = [
     "trossen-arm>=1.10.0",
     "atomics>=1.0.3",
     "pynput>=1.8.2",
+    "mcap>=1.4.0",
 ]
 
 # PyTorch CUDA 12.8 wheel index — use cu128 builds for CUDA 12.x systems

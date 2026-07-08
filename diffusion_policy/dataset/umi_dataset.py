@@ -42,52 +42,9 @@ class UmiDataset(BaseDataset):
         self.pose_repr = pose_repr
         self.obs_pose_repr = self.pose_repr.get('obs_pose_repr', 'rel')
         self.action_pose_repr = self.pose_repr.get('action_pose_repr', 'rel')
-        
-        if cache_dir is None:
-            # load into memory store
-            with zarr.ZipStore(dataset_path, mode='r') as zip_store:
-                replay_buffer = ReplayBuffer.copy_from_store(
-                    src_store=zip_store, 
-                    store=zarr.MemoryStore()
-                )
-        else:
-            # TODO: refactor into a stand alone function?
-            # determine path name
-            mod_time = os.path.getmtime(dataset_path)
-            stamp = datetime.fromtimestamp(mod_time).isoformat()
-            stem_name = os.path.basename(dataset_path).split('.')[0]
-            cache_name = '_'.join([stem_name, stamp])
-            cache_dir = pathlib.Path(os.path.expanduser(cache_dir))
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_path = cache_dir.joinpath(cache_name + '.zarr.mdb')
-            lock_path = cache_dir.joinpath(cache_name + '.lock')
-            
-            # load cached file
-            print('Acquiring lock on cache.')
-            with FileLock(lock_path):
-                # cache does not exist
-                if not cache_path.exists():
-                    try:
-                        with zarr.LMDBStore(str(cache_path),     
-                            writemap=True, metasync=False, sync=False, map_async=True, lock=False
-                            ) as lmdb_store:
-                            with zarr.ZipStore(dataset_path, mode='r') as zip_store:
-                                print(f"Copying data to {str(cache_path)}")
-                                ReplayBuffer.copy_from_store(
-                                    src_store=zip_store,
-                                    store=lmdb_store
-                                )
-                        print("Cache written to disk!")
-                    except Exception as e:
-                        shutil.rmtree(cache_path)
-                        raise e
-            
-            # open read-only lmdb store
-            store = zarr.LMDBStore(str(cache_path), readonly=True, lock=False)
-            replay_buffer = ReplayBuffer.create_from_group(
-                group=zarr.group(store)
-            )
-        
+
+        replay_buffer = self._load_replay_buffer(dataset_path, cache_dir)
+
         self.num_robot = 0
         rgb_keys = list()
         lowdim_keys = list()
@@ -171,7 +128,53 @@ class UmiDataset(BaseDataset):
         self.temporally_independent_normalization = temporally_independent_normalization
         self.threadpool_limits_is_applied = False
 
-    
+    def _load_replay_buffer(self, dataset_path: str, cache_dir: Optional[str]) -> ReplayBuffer:
+        if cache_dir is None:
+            # load into memory store
+            with zarr.ZipStore(dataset_path, mode='r') as zip_store:
+                replay_buffer = ReplayBuffer.copy_from_store(
+                    src_store=zip_store,
+                    store=zarr.MemoryStore()
+                )
+        else:
+            # TODO: refactor into a stand alone function?
+            # determine path name
+            mod_time = os.path.getmtime(dataset_path)
+            stamp = datetime.fromtimestamp(mod_time).isoformat()
+            stem_name = os.path.basename(dataset_path).split('.')[0]
+            cache_name = '_'.join([stem_name, stamp])
+            cache_dir = pathlib.Path(os.path.expanduser(cache_dir))
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir.joinpath(cache_name + '.zarr.mdb')
+            lock_path = cache_dir.joinpath(cache_name + '.lock')
+
+            # load cached file
+            print('Acquiring lock on cache.')
+            with FileLock(lock_path):
+                # cache does not exist
+                if not cache_path.exists():
+                    try:
+                        with zarr.LMDBStore(str(cache_path),
+                            writemap=True, metasync=False, sync=False, map_async=True, lock=False
+                            ) as lmdb_store:
+                            with zarr.ZipStore(dataset_path, mode='r') as zip_store:
+                                print(f"Copying data to {str(cache_path)}")
+                                ReplayBuffer.copy_from_store(
+                                    src_store=zip_store,
+                                    store=lmdb_store
+                                )
+                        print("Cache written to disk!")
+                    except Exception as e:
+                        shutil.rmtree(cache_path)
+                        raise e
+
+            # open read-only lmdb store
+            store = zarr.LMDBStore(str(cache_path), readonly=True, lock=False)
+            replay_buffer = ReplayBuffer.create_from_group(
+                group=zarr.group(store)
+            )
+        return replay_buffer
+
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
