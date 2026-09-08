@@ -169,21 +169,39 @@ def detect_localize_aruco_tags(
     param = cv2.aruco.DetectorParameters()
     if refine_subpix:
         param.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    corners, ids, rejectedImgPoints = cv2.aruco.detectMarkers(
-        image=img, dictionary=aruco_dict, parameters=param)
+    detector = cv2.aruco.ArucoDetector(aruco_dict, param)
+    corners, ids, rejectedImgPoints = detector.detectMarkers(img)
     if len(corners) == 0:
         return dict()
+
+    # 3D object points of a flat square marker centered at the origin.
+    # Corners are ordered: top-left, top-right, bottom-right, bottom-left
+    # (clockwise when viewed from the front, matching the ArUco convention).
+    def _marker_obj_pts(size_m: float) -> np.ndarray:
+        h = size_m / 2
+        return np.array([
+            [-h,  h, 0],
+            [ h,  h, 0],
+            [ h, -h, 0],
+            [-h, -h, 0],
+        ], dtype=np.float64)
 
     tag_dict = dict()
     for this_id, this_corners in zip(ids, corners):
         this_id = int(this_id[0])
         if this_id not in marker_size_map:
             continue
-        
+
         marker_size_m = marker_size_map[this_id]
+        # Undistort the detected corners using the fisheye model before solving
+        # for pose, since solvePnP expects points in a pinhole image plane.
         undistorted = cv2.fisheye.undistortPoints(this_corners, K, D, P=K)
-        rvec, tvec, markerPoints = cv2.aruco.estimatePoseSingleMarkers(
-            undistorted, marker_size_m, K, np.zeros((1,5)))
+        _, rvec, tvec = cv2.solvePnP(
+            _marker_obj_pts(marker_size_m),
+            undistorted.reshape(4, 2),
+            K,
+            np.zeros((1, 5)),
+        )
         tag_dict[this_id] = {
             'rvec': rvec.squeeze(),
             'tvec': tvec.squeeze(),
