@@ -1,6 +1,31 @@
 import numpy as np
 import scipy.spatial.transform as st
 
+# Tool-frame relabel between the UMI/GoPro CAMERA convention used in the dataset
+# (+X right, +Y down, +Z forward/approach) and the Trossen TCP convention
+# (+X forward/approach, +Y left, +Z up). For a gripper pose as a 4x4 matrix:
+#     tx_*_trossen = tx_*_cam     @ X_TOOL_CAM_TO_TROSSEN
+#     tx_*_cam     = tx_*_trossen @ X_TOOL_TROSSEN_TO_CAM
+#
+# The 3x3 rotation block holds the Trossen axes written in camera coords
+# (approach=+Z_cam, left=-X_cam, up=-Y_cam).
+#
+# The translation handles the FINGER-LENGTH offset: the UMI fingers are ~75 mm
+# longer than the stock Trossen fingers, but the Trossen IK reports/accepts the
+# stock TCP, which sits 75 mm BEHIND the real UMI fingertip along the approach
+# axis. The dataset is recorded at the fingertip, so the trossen-TCP origin is at
+# camera-frame (0, 0, -UMI_FINGER_OFFSET) (i.e. 75 mm back along approach = -Z_cam).
+# Folding it here makes both replay and eval put the real fingertip on the
+# trajectory, including the lever-arm effect during rotations.
+UMI_FINGER_OFFSET = 0.085  # metres, along the gripper approach axis
+X_TOOL_CAM_TO_TROSSEN = np.array([
+    [0, -1,  0,  0.0],
+    [0,  0, -1,  0.0],
+    [1,  0,  0, -UMI_FINGER_OFFSET],
+    [0,  0,  0,  1.0],
+], dtype=np.float64)
+X_TOOL_TROSSEN_TO_CAM = np.linalg.inv(X_TOOL_CAM_TO_TROSSEN)
+
 def pos_rot_to_mat(pos, rot):
     shape = pos.shape[:-1]
     mat = np.zeros(shape + (4,4), dtype=pos.dtype)

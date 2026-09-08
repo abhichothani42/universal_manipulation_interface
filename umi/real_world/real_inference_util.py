@@ -7,8 +7,9 @@ from diffusion_policy.common.pose_repr_util import (
     convert_pose_mat_rep
 )
 from umi.common.pose_util import (
-    pose_to_mat, mat_to_pose, 
-    mat_to_pose10d, pose10d_to_mat)
+    pose_to_mat, mat_to_pose,
+    mat_to_pose10d, pose10d_to_mat,
+    X_TOOL_CAM_TO_TROSSEN, X_TOOL_TROSSEN_TO_CAM)
 from diffusion_policy.model.common.rotation_transformer import \
     RotationTransformer
 
@@ -99,11 +100,12 @@ def get_real_umi_obs_dict(
 
     # generate relative pose
     for robot_prefix in robot_prefix_map.keys():
-        # convert pose to mat
+        # convert pose to mat (Trossen TCP convention -> camera convention the
+        # policy was trained on)
         pose_mat = pose_to_mat(np.concatenate([
             env_obs[robot_prefix + '_eef_pos'],
             env_obs[robot_prefix + '_eef_rot_axis_angle']
-        ], axis=-1))
+        ], axis=-1)) @ X_TOOL_TROSSEN_TO_CAM
 
         # solve reltaive obs
         obs_pose_mat = convert_pose_mat_rep(
@@ -124,14 +126,14 @@ def get_real_umi_obs_dict(
         tx_robota_tcpa = pose_to_mat(np.concatenate([
             env_obs[f'robot{robot_id}_eef_pos'],
             env_obs[f'robot{robot_id}_eef_rot_axis_angle']
-        ], axis=-1))
+        ], axis=-1)) @ X_TOOL_TROSSEN_TO_CAM
         for other_robot_id in range(n_robots):
             if robot_id == other_robot_id:
                 continue
             tx_robotb_tcpb = pose_to_mat(np.concatenate([
                 env_obs[f'robot{other_robot_id}_eef_pos'],
                 env_obs[f'robot{other_robot_id}_eef_rot_axis_angle']
-            ], axis=-1))
+            ], axis=-1)) @ X_TOOL_TROSSEN_TO_CAM
             tx_robota_robotb = tx_robot1_robot0
             if robot_id == 0:
                 tx_robota_robotb = np.linalg.inv(tx_robot1_robot0)
@@ -149,15 +151,15 @@ def get_real_umi_obs_dict(
     # generate relative pose with respect to episode start
     if episode_start_pose is not None:
         for robot_id in range(n_robots):        
-            # convert pose to mat
+            # convert pose to mat (Trossen TCP -> camera convention)
             pose_mat = pose_to_mat(np.concatenate([
                 env_obs[f'robot{robot_id}_eef_pos'],
                 env_obs[f'robot{robot_id}_eef_rot_axis_angle']
-            ], axis=-1))
-            
-            # get start pose
+            ], axis=-1)) @ X_TOOL_TROSSEN_TO_CAM
+
+            # get start pose (also Trossen TCP -> camera convention)
             start_pose = episode_start_pose[robot_id]
-            start_pose_mat = pose_to_mat(start_pose)
+            start_pose_mat = pose_to_mat(start_pose) @ X_TOOL_TROSSEN_TO_CAM
             rel_obs_pose_mat = convert_pose_mat_rep(
                 pose_mat,
                 base_pose_mat=start_pose_mat,
@@ -179,25 +181,28 @@ def get_real_umi_action(
     n_robots = int(action.shape[-1] // 10)
     env_action = list()
     for robot_idx in range(n_robots):
-        # convert pose to mat
+        # convert pose to mat (Trossen TCP convention -> camera convention so the
+        # base matches the camera-frame relative action the policy outputs)
         pose_mat = pose_to_mat(np.concatenate([
             env_obs[f'robot{robot_idx}_eef_pos'][-1],
             env_obs[f'robot{robot_idx}_eef_rot_axis_angle'][-1]
-        ], axis=-1))
+        ], axis=-1)) @ X_TOOL_TROSSEN_TO_CAM
 
         start = robot_idx * 10
         action_pose10d = action[..., start:start+9]
         action_grip = action[..., start+9:start+10]
         action_pose_mat = pose10d_to_mat(action_pose10d)
 
-        # solve relative action
+        # solve relative action (result is a camera-convention target pose)
         action_mat = convert_pose_mat_rep(
-            action_pose_mat, 
+            action_pose_mat,
             base_pose_mat=pose_mat,
             pose_rep=action_pose_repr,
             backward=True)
 
-        # convert action to pose
+        # convert action to pose (camera convention -> Trossen TCP convention
+        # before sending it to the robot)
+        action_mat = action_mat @ X_TOOL_CAM_TO_TROSSEN
         action_pose = mat_to_pose(action_mat)
         env_action.append(action_pose)
         env_action.append(action_grip)
