@@ -4,8 +4,12 @@ This fork of UMI replaces the original UR5 + SpaceMouse real-world eval
 hardware with **Trossen leader/follower arms**, moves the project to
 `uv`/`pyproject.toml`, and adds a couple of dependency-driven bug fixes and a
 training-data path that reads `trumi`'s MCAP recordings directly. This doc
-covers what changed and why; see the main `README.md` for the original UMI
-data collection / SLAM pipeline, which is unaffected.
+covers what changed and why; the data collection / generation pipeline for
+Trossen-specific UMI lives in a separate repo,
+[TrossenRobotics/trumi](https://github.com/TrossenRobotics/trumi/tree/main) —
+follow that repo's docs for data collection. The original UMI SLAM
+pipeline in the main `README.md` still applies as-is and is unaffected by
+this fork; follow it too.
 
 ## Install (uv)
 
