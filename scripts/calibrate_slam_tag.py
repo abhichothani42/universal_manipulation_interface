@@ -14,7 +14,20 @@ import json
 import pandas as pd
 from scipy.spatial.transform import Rotation
 from umi.common.pose_util import pose_to_mat
-from skfda.exploratory.stats import geometric_median
+
+
+def geometric_median(X, eps=1e-5, max_iter=300):
+    """Weiszfeld algorithm for geometric median of rows of X."""
+    y = np.mean(X, axis=0)
+    for _ in range(max_iter):
+        dists = np.linalg.norm(X - y, axis=1)
+        dists = np.where(dists < eps, eps, dists)
+        weights = 1.0 / dists
+        y_new = np.average(X, axis=0, weights=weights)
+        if np.linalg.norm(y_new - y) < eps:
+            break
+        y = y_new
+    return y
 
 # %%
 @click.command()
