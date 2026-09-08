@@ -26,13 +26,21 @@ import pathlib
 import time
 from multiprocessing.managers import SharedMemoryManager
 
+# Import cv2 and open its GUI/X11 connection BEFORE importing `av` (PyAV) and
+# `torch`. PyAV and torch each load their own ffmpeg/threading libraries; if both
+# are imported before OpenCV's Qt backend initializes its X11 (xcb) connection,
+# the first cv2 GUI call deadlocks inside Qt's shared-memory probe
+import cv2
+import numpy as np
+# # Force OpenCV single-threaded in the parent BEFORE the env forks its camera
+# # subprocesses.
+cv2.setNumThreads(1)
+
 import av
 import click
-import cv2
 import yaml
 import dill
 import hydra
-import numpy as np
 import scipy.spatial.transform as st
 import torch
 from omegaconf import OmegaConf

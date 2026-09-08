@@ -231,15 +231,19 @@ class UvcCamera(mp.Process):
                 ret = cap.grab()
                 assert ret
                 
-                # directly write into shared memory to avoid copy
-                frame = self.video_recorder.get_img_buffer()
+                # directly write into shared memory to avoid copy when recording,
+                # otherwise let OpenCV allocate a temporary buffer
+                if self.video_recorder.is_ready():
+                    frame = self.video_recorder.get_img_buffer()
+                else:
+                    frame = None
                 ret, frame = cap.retrieve(frame)
                 t_recv = time.time()
                 assert ret
                 mt_cap = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
                 t_cap = mt_cap - time.monotonic() + time.time()
                 t_cal = t_recv - self.receive_latency # calibrated latency
-                     
+
                 # record frame
                 if self.video_recorder.is_ready():
                     self.video_recorder.write_img_buffer(frame, frame_time=t_cal)

@@ -6,6 +6,12 @@ ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(ROOT_DIR)
 os.chdir(ROOT_DIR)
 
+# Disable Qt/X11 MIT shared-memory before cv2 is imported — same fix as eval_real.py.
+# Without this, cv2.imshow crashes with "xcb_shm_create_segment() failed" when
+# a UvcCamera subprocess is already running.
+os.environ.setdefault('QT_X11_NO_MITSHM', '1')
+os.environ.setdefault('OPENCV_VIDEOIO_PRIORITY_MSMF', '0')
+
 # %%
 import click
 import cv2
@@ -21,15 +27,29 @@ from matplotlib import pyplot as plt
 
 # %%
 @click.command()
-@click.option('-ci', '--camera_idx', type=int, default=0)
+@click.option('-ci', '--camera_idx', type=int, default=1,
+              help='Index into sorted v4l paths. 0=integrated webcam, 1=Elgato/GoPro.')
 @click.option('-qs', '--qr_size', type=int, default=720)
 @click.option('-f', '--fps', type=int, default=60)
 @click.option('-n', '--n_frames', type=int, default=120)
 def main(camera_idx, qr_size, fps, n_frames):
+    # Initialise cv2 GUI connection in the main process BEFORE spawning the
+    # UvcCamera subprocess.  Matches the pre-init pattern in eval_real.py.
+    cv2.setNumThreads(1)
+    cv2.namedWindow('Timestamp QRCode', cv2.WINDOW_NORMAL)
+    cv2.namedWindow('Camera', cv2.WINDOW_NORMAL)
+    cv2.imshow('Timestamp QRCode', np.zeros((qr_size, qr_size, 3), dtype=np.uint8))
+    cv2.pollKey()
+
     # Find and reset all Elgato capture cards.
     # Required to workaround a firmware bug.
     reset_all_elgato_devices()
+    time.sleep(1.0)   # wait for Elgato to re-enumerate after reset
     v4l_paths = get_sorted_v4l_paths()
+    print('Available cameras:')
+    for i, p in enumerate(v4l_paths):
+        marker = ' <-- selected' if i == camera_idx else ''
+        print(f'  [{i}] {p}{marker}')
     v4l_path = v4l_paths[camera_idx]
     get_max_k = n_frames
     detector = cv2.QRCodeDetector()
@@ -41,7 +61,6 @@ def main(camera_idx, qr_size, fps, n_frames):
             capture_fps=fps,
             get_max_k=get_max_k
         ) as camera:
-            cv2.setNumThreads(1)
             qr_latency_deque = deque(maxlen=get_max_k)
             qr_det_queue = deque(maxlen=get_max_k)
             data = None
