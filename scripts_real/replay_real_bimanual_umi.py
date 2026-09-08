@@ -34,12 +34,15 @@ import time
 from multiprocessing.managers import SharedMemoryManager
 
 import zarr
+# cv2 and numpy must be imported before av and torch so OpenCV's Qt/X11
+# backend initialises before ffmpeg/torch load their threading libraries.
+import cv2
+import numpy as np
+cv2.setNumThreads(1)
 import av
 import click
-import cv2
 import dill
 import hydra
-import numpy as np
 import scipy.spatial.transform as st
 import torch
 from omegaconf import OmegaConf
@@ -66,8 +69,9 @@ from umi.real_world.real_inference_util import (get_real_obs_dict,
                                                 get_real_obs_resolution,
                                                 get_real_umi_obs_dict,
                                                 get_real_umi_action)
-from umi.real_world.spacemouse_shared_memory import Spacemouse
-from umi.common.pose_util import pose_to_mat, mat_to_pose
+from umi.real_world.leader_arm_shared_memory import LeaderArm
+from umi.common.pose_util import (pose_to_mat, mat_to_pose,
+    X_TOOL_CAM_TO_TROSSEN, X_TOOL_TROSSEN_TO_CAM)
 from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs, JpegXl
 register_codecs()
 
@@ -127,8 +131,9 @@ def solve_sphere_collision(ee_poses, robots_config):
 # @click.option('--gripper_ip', '-gi', default='172.24.95.17')
 # @click.option('--robot_ip', default='172.24.95.8')
 # @click.option('--gripper_ip', default='172.24.95.18')
-@click.option('--robot_ip', default='172.16.0.3')
-@click.option('--gripper_ip', default='172.24.95.27')
+@click.option('--robot_ip', default='192.168.1.4', help='Follower arm IP')
+@click.option('--leader_ip', default='192.168.1.2', help='Leader arm IP (replaces SpaceMouse)')
+@click.option('--gripper_ip', default='172.24.95.27', help='Unused for Trossen; kept for compatibility')
 @click.option('--match_dataset', '-m', default=None, help='Dataset used to overlay and adjust initial condition')
 @click.option('--match_episode', '-me', default=None, type=int, help='Match specific episode from the match dataset')
 @click.option('--match_camera', '-mc', default=0, type=int)
@@ -140,29 +145,48 @@ def solve_sphere_collision(ee_poses, robots_config):
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency between receiving SapceMouse command to executing on Robot in Sec.")
 @click.option('-nm', '--no_mirror', is_flag=True, default=False)
-def main(input, output, replay_episode, robot_ip, gripper_ip, 
+def main(input, output, replay_episode, robot_ip, leader_ip, gripper_ip,
     match_dataset, match_episode, match_camera,
     camera_reorder,
     vis_camera_idx, init_joints, 
     steps_per_inference, max_duration,
     frequency, command_latency, 
     no_mirror):
-    max_gripper_width = 0.09
+    # total gripper opening in meters (full gap between both fingers)
+    max_gripper_width = 0.088
     gripper_speed = 0.2
 
-    tx_tag_right = np.array([
-        [0, -1, 0, 0.472],
-        [1, 0, 0, -0.96],
-        [0, 0, 1, -0.027],
-        [0, 0, 0, 1]
-    ])
-    tx_tag_left = np.array([
-        [0, -1, 0, -0.405],
-        [1, 0, 0, -0.97],
-        [0, 0, 1, -0.022],
-        [0, 0, 0, 1]
-    ])
-    rob_tag_tfs = [tx_tag_right, tx_tag_left]
+    # ================================================================
+    # Replaying a dataset trajectory on the Trossen requires TWO fixes.
+    #
+    # The dataset stores each pose as tx_tag_cam: the gripper pose in the ArUco
+    # TAG frame (Z-up), with orientation in the GoPro CAMERA convention
+    # (+X right, +Y down, +Z forward/approach). We want tx_base_tcp: the pose in
+    # the Trossen BASE frame (X fwd, Y left, Z up), in the Trossen TCP convention.
+    #
+    #     tx_base_tcp = tx_base_tag @ tx_tag_cam @ X_tool
+    #                   \_________/              \______/
+    #                   (1) world offset         (2) tool-frame relabel
+    #
+    # (1) tx_base_tag - WORLD offset (tag -> base). UR5 hard-coded a measured
+    #     matrix (tx_tag_right/left); we don't have that calibration, so we BUILD
+    #     one per episode by anchoring the episode's FIRST dataset frame to the
+    #     robot's CURRENT actual pose:
+    #         tx_base_tag = tx_base_tcp_now @ inv(X_tool) @ inv(tx_tag_cam[0])
+    #     => frame 0 maps exactly onto where the robot already is, so it starts in
+    #        place and then moves along the demo from there.
+    #
+    # (2) X_tool - fixed TOOL-frame relabel (camera convention -> Trossen TCP
+    #     convention). UR5 needed none (its TCP is already Z=approach like the
+    #     camera). Trossen's TCP is X=approach, so we right-multiply by this
+    #     constant rotation. Columns = Trossen axes written in camera coords:
+    #       Trossen X (approach) = camera +Z
+    #       Trossen Y (left)     = camera -X
+    #       Trossen Z (up)       = camera -Y
+    #     It rotates orientation only; the gripper-tip position is unchanged.
+    #     Defined once in umi/common/pose_util.py and shared with eval.
+    X_tool = X_TOOL_CAM_TO_TROSSEN
+    X_tool_inv = X_TOOL_TROSSEN_TO_CAM
 
 
     # load replay buffer
@@ -183,21 +207,37 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
     replay_buffer = ReplayBuffer.create_from_group(root)
 
     episode_data = None
-    
+
     # replay_episode = replay_buffer.n_episodes - 1
-    pose_data = dict()
 
-    for robot_idx in range(2):
-        pos = replay_buffer.data[f'robot{robot_idx}_eef_pos'][:]
-        rot = replay_buffer.data[f'robot{robot_idx}_eef_rot_axis_angle'][:]
-        pose = np.concatenate([pos, rot], axis=-1)
-        tx_tag_tcp = pose_to_mat(pose)
-        tx_tag_robot = rob_tag_tfs[robot_idx]
-        tx_robot_tcp = np.linalg.inv(tx_tag_robot) @ tx_tag_tcp
-        tcp_pose = mat_to_pose(tx_robot_tcp)
-        pose_data[f'robot{robot_idx}_tcp_pose'] = tcp_pose
+    def episode_pose_to_robot(episode_idx, robot_anchor_poses):
+        """Convert one episode's dataset poses to Trossen base-frame TCP poses:
+            tx_base_tcp = tx_base_tag @ tx_tag_cam @ X_tool
+        tx_base_tag is anchored so the episode's FIRST frame maps onto the robot's
+        current actual pose, i.e. the robot starts where it is and moves from there.
 
-    
+        robot_anchor_poses: list of (6,) actual TCP poses [x,y,z,rx,ry,rz]
+            (base frame), one per robot - the pose the robot is in right now.
+        Returns (pose_data, episode_slice); pose_data[f'robot{i}_tcp_pose'] is an
+        (N, 6) array already in the Trossen base frame.
+        """
+        s = replay_buffer.get_episode_slice(episode_idx)
+        out = dict()
+        for robot_idx in range(len(robot_anchor_poses)):
+            pos = replay_buffer.data[f'robot{robot_idx}_eef_pos'][s]
+            rot = replay_buffer.data[f'robot{robot_idx}_eef_rot_axis_angle'][s]
+            tx_tag_cam = pose_to_mat(np.concatenate([pos, rot], axis=-1))  # (N,4,4)
+
+            # anchor frame 0 onto the robot's current pose:
+            #   tx_base_tag = tx_base_tcp_now @ inv(X_tool) @ inv(tx_tag_cam[0])
+            tx_base_tcp_now = pose_to_mat(np.asarray(robot_anchor_poses[robot_idx]))
+            tx_base_tag = tx_base_tcp_now @ X_tool_inv @ np.linalg.inv(tx_tag_cam[0])
+
+            tx_base_tcp = tx_base_tag @ tx_tag_cam @ X_tool  # (N,4,4)
+            out[f'robot{robot_idx}_tcp_pose'] = mat_to_pose(tx_base_tcp)
+        return out, s
+
+
     # setup experiment
     dt = 1/frequency
 
@@ -207,34 +247,35 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
 
     robots_config = [
         {
-            'robot_type': 'ur5e',
-            'robot_ip': '172.24.95.8',
-            'robot_obs_latency': 0.0001, 'robot_action_latency': 0.1, 'tcp_offset': 0.235,
-            'height_threshold': 0.027,
-            'sphere_radius': 0.13, 'sphere_center': [0, 0, -0.185],
-        },
-        {
-            'robot_type': 'ur5',
-            'robot_ip': '172.24.95.9',
-            'robot_obs_latency': 0.0001, 'robot_action_latency': 0.1, 'tcp_offset': 0.235,
-            'height_threshold': 0.022,
-            'sphere_radius': 0.13, 'sphere_center': [0, 0, -0.185],
+            'robot_type': 'trossen',
+            'robot_ip': robot_ip,
+            'leader_ip': leader_ip,
+            'frequency': 125,
+            'robot_obs_latency': 0.0001, 'robot_action_latency': 0.02,
+            'gripper_max_width': max_gripper_width,
+            'init_joints_pos': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            'height_threshold': -1000000.0,   # set to table z to enable collision avoidance
+            'sphere_radius': 0.0, 'sphere_center': [0, 0, 0],
         }
     ]
+    # For Trossen the gripper is the 7th joint of the arm — no separate gripper controller.
+    # gripper_ip/port are unused; obs/action latencies match robot_action_latency.
     grippers_config = [
         {
-            'gripper_ip': '172.24.95.18',
-            'gripper_port': 1000, 'gripper_obs_latency': 0.01, 'gripper_action_latency': 0.1
-        },
-        {
-            'gripper_ip': '172.24.95.27',
-            'gripper_port': 1000, 'gripper_obs_latency': 0.01, 'gripper_action_latency': 0.1
+            'gripper_ip': '', 'gripper_port': 0,
+            'gripper_obs_latency': 0.0001, 'gripper_action_latency': 0.02,
         }
     ]
 
     print("steps_per_inference:", steps_per_inference)
     with SharedMemoryManager() as shm_manager:
-        with Spacemouse(shm_manager=shm_manager) as sm, \
+        with LeaderArm(
+                shm_manager=shm_manager,
+                leader_ip=leader_ip,
+                frequency=100,
+                init_joints_pos=(np.array(robots_config[0]['init_joints_pos'])
+                    if robots_config[0].get('init_joints_pos') is not None else None),
+            ) as leader, \
             KeystrokeCounter() as key_counter, \
             BimanualUmiEnv(
                 output_dir=output,
@@ -247,7 +288,7 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
                 init_joints=init_joints,
                 enable_multi_cam_vis=True,
                 # latency
-                camera_obs_latency=0.17,
+                camera_obs_latency=0.1,
                 # obs
                 camera_obs_horizon=2,
                 robot_obs_horizon=2,
@@ -255,10 +296,12 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
                 no_mirror=no_mirror,
                 fisheye_converter=fisheye_converter,
                 # action
-                max_pos_speed=2.0,
-                max_rot_speed=6.0,
+                max_pos_speed=0.25/4,
+                max_rot_speed=0.6/4,
                 shm_manager=shm_manager) as env:
             cv2.setNumThreads(2)
+            # leader arm used for teleoperation; one per follower robot
+            leaders = [leader]
             print("Waiting for camera")
             time.sleep(1.0)
 
@@ -331,14 +374,15 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
                             print('w')
                         elif key_stroke == KeyCode(char='m'):
                             # move the robot
-                            duration = 3.0
+                            duration = 5.0
                             # ep = replay_buffer.get_episode(replay_episode)
-                            s = replay_buffer.get_episode_slice(replay_episode)
+                            anchors = [rs['ActualTCPPose'] for rs in env.get_robot_state()]
+                            pose_data, s = episode_pose_to_robot(replay_episode, anchors)
 
-                            for robot_idx in range(2):
-                                pose = pose_data[f'robot{robot_idx}_tcp_pose'][s.start]
-                                grip = replay_buffer.data[f'robot{robot_idx}_gripper_width'][s.start]
-                                env.robots[robot_idx].servoL(pose, duration=duration)
+                            for robot_idx in range(len(robots_config)):
+                                pose = pose_data[f'robot{robot_idx}_tcp_pose'][0]
+                                grip = float(np.squeeze(replay_buffer.data[f'robot{robot_idx}_gripper_width'][s.start]))
+                                env.robots[robot_idx].schedule_waypoint(pose, target_time=time.time() + duration)
                                 env.grippers[robot_idx].schedule_waypoint(grip, target_time=time.time() + duration)
                                 target_pose[robot_idx] = pose
                                 gripper_target_pos[robot_idx] = grip
@@ -362,27 +406,14 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
                         break
 
                     precise_wait(t_sample)
-                    # get teleop command
-                    sm_state = sm.get_motion_state_transformed()
-                    # print(sm_state)
-                    dpos = sm_state[:3] * (0.5 / frequency)
-                    drot_xyz = sm_state[3:] * (1.5 / frequency)
-
-                    drot = st.Rotation.from_euler('xyz', drot_xyz)
-                    for robot_idx in control_robot_idx_list:
-                        target_pose[robot_idx, :3] += dpos
-                        target_pose[robot_idx, 3:] = (drot * st.Rotation.from_rotvec(
-                            target_pose[robot_idx, 3:])).as_rotvec()
-                        # target_pose[robot_idx, 2] = np.maximum(target_pose[robot_idx, 2], 0.055)
-
-                    dpos = 0
-                    if sm.is_button_pressed(0):
-                        # close gripper
-                        dpos = -gripper_speed / frequency
-                    if sm.is_button_pressed(1):
-                        dpos = gripper_speed / frequency
-                    for robot_idx in control_robot_idx_list:
-                        gripper_target_pos[robot_idx] = np.clip(gripper_target_pos[robot_idx] + dpos, 0, max_gripper_width)
+                    # get teleop command from leader arm(s):
+                    # follower mirrors the leader's absolute 6-DOF pose and gripper width.
+                    # LeaderGripperPos is total-width (driver one-side × 2), matching zarr convention.
+                    for robot_idx in range(target_pose.shape[0]):
+                        leader_state = leaders[robot_idx].get_state()
+                        target_pose[robot_idx] = np.array(leader_state['LeaderTCPPose'])
+                        gripper_target_pos[robot_idx] = np.clip(
+                            float(leader_state['LeaderGripperPos']), 0, max_gripper_width)
 
                     # solve collision with table
                     for robot_idx in control_robot_idx_list:
@@ -415,19 +446,20 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
                 # ========== policy control loop ==============
                 try:
                     episode_data = replay_buffer.get_episode(replay_episode)
-                    s = replay_buffer.get_episode_slice(replay_episode)
+                    anchors = [rs['ActualTCPPose'] for rs in env.get_robot_state()]
+                    pose_data, s = episode_pose_to_robot(replay_episode, anchors)
 
                     # pre-compute interpolation
-                    data_frequency = 59.94
-                    slowdown = 2.0
-                    n_data_samples = len(pose_data['robot0_tcp_pose'][s])
+                    data_frequency = 60.0
+                    slowdown = 10.0
+                    n_data_samples = len(pose_data['robot0_tcp_pose'])
                     data_timestamps = np.arange(n_data_samples).astype(np.float32) / data_frequency
                     exec_timestamps = np.arange(int(np.floor(data_timestamps[-1] * frequency * slowdown))) / frequency / slowdown
                     exec_data_idxs = np.round(np.clip(exec_timestamps, 0, data_timestamps[-1]) * data_frequency).astype(np.int32)
 
-                    actions = np.zeros((len(exec_timestamps), 14))
-                    for robot_idx in range(2):
-                        data_pose = pose_data[f'robot{robot_idx}_tcp_pose'][s]
+                    actions = np.zeros((len(exec_timestamps), 7 * len(robots_config)))
+                    for robot_idx in range(len(robots_config)):
+                        data_pose = pose_data[f'robot{robot_idx}_tcp_pose']
                         data_pose_interpolator = PoseInterpolator(data_timestamps, data_pose)
                         data_gripper_interpolator = get_interp1d(data_timestamps, episode_data[f'robot{robot_idx}_gripper_width'])
                         exec_pose = data_pose_interpolator(exec_timestamps)
@@ -458,6 +490,7 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
                     #     actions=actions, 
                     #     timestamps=ts)
 
+                    n_cameras = sum(1 for k in episode_data if k.startswith('camera') and k.endswith('_rgb'))
                     for iter_idx, _ in enumerate(exec_timestamps):
                         t = iter_idx / frequency
                         t_cycle_start = t_start + t
@@ -475,7 +508,7 @@ def main(input, output, replay_episode, robot_ip, gripper_ip,
                         # plot image overlay
                         data_idx = exec_data_idxs[iter_idx]
                         vis_imgs = list()
-                        for camera_idx in range(2):
+                        for camera_idx in range(n_cameras):
                             img = episode_data[f'camera{camera_idx}_rgb'][data_idx]
                             vis_img = obs[f'camera{camera_idx}_rgb'][-1]
                             match_img = img.astype(np.float32) / 255
